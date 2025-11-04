@@ -39,7 +39,7 @@ permissions:
 env:
   # Fallbacks; you can set these secrets or override via workflow inputs
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
   MANAGED_LABEL: managed-by=gha-examples
 
 concurrency:
@@ -79,7 +79,7 @@ jobs:
             # returns array; we’ll pick the only one if there’s exactly one
             mapfile -t CLS < <(aws eks list-clusters --region "$REGION" --query 'clusters' --output text | tr '\t' '\n' | sed '/^$/d')
             if [ "${#CLS[@]}" -eq 0 ]; then
-              echo "::error::No EKS clusters found in $REGION. Provide input cluster-name or set secret EKS_CLUSTER_NAME."
+              echo "::error::No EKS clusters found in $REGION. Provide input cluster-name or set secret CLUSTER_NAME."
               exit 1
             elif [ "${#CLS[@]}" -eq 1 ]; then
               CLUSTER="${CLS[0]}"
