@@ -148,7 +148,7 @@ jobs:
               kubectl apply --server-side --force-conflicts -n "${NS}" -f "$f"
               # add a management label (best-effort)
               # labels only apply to namespaced resources we can find afterward
-              kubectl -n "${NS}" get -f "$f" -o name | xargs -r -n1 kubectl -n "${NS}" label --overwrite "$MANAGED_LABEL"
+              kubectl -n "${NS}" get -f "$f" -o name | xargs -r -n1 -I{} kubectl -n "${NS}" label --overwrite {} "$MANAGED_LABEL" || echo "warn: label best-effort"
             else
               kubectl delete -n "${NS}" -f "$f" --ignore-not-found=true
             fi
