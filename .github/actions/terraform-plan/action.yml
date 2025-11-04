@@ -51,7 +51,7 @@ runs:
         echo 'plugin_cache_dir="$HOME/.terraform.d/plugin-cache"' > "$HOME/.terraformrc"
         mkdir -p "$HOME/.terraform.d/plugin-cache"
 
-    # ----- PRE-INIT: compute lockfile hash (may not exist yet)
+    # ---- PRE-INIT LOCK HASH (may not exist)
     - name: Compute lockfile hash (pre-init)
       id: lockhash_pre
       shell: bash
@@ -59,17 +59,15 @@ runs:
         set -e
         lf="${{ inputs.terraform-directory }}/.terraform.lock.hcl"
         if [ -f "$lf" ]; then
-          h=$(sha256sum "$lf" | awk '{print $1}')
           echo "found=true" >> "$GITHUB_OUTPUT"
-          echo "hash=$h" >> "$GITHUB_OUTPUT"
+          echo "hash=$(sha256sum "$lf" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
         else
           echo "found=false" >> "$GITHUB_OUTPUT"
           echo "hash=NOLOCK" >> "$GITHUB_OUTPUT"
         fi
 
-    # ----- RESTORE CACHES (specific first, then generic)
+    # ---- RESTORE CACHES (specific then generic)
 
-    # Plugin cache (specific)
     - name: Restore plugin cache (specific)
       id: tf_cache_spec
       uses: actions/cache/restore@v3
@@ -77,9 +75,8 @@ runs:
         path: ~/.terraform.d/plugin-cache
         key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-${{ steps.lockhash_pre.outputs.hash }}
 
-    # Plugin cache (generic fallback)
     - name: Restore plugin cache (generic)
-      if: steps.tf_cache_spec.outputs['cache-hit'] != 'true'
+      if: steps.tf_cache_spec.outputs.cache-matched-key == ''
       id: tf_cache
       uses: actions/cache/restore@v3
       with:
@@ -88,7 +85,6 @@ runs:
         restore-keys: |
           ${{ runner.os }}-tf-plugin-cache-
 
-    # Workdir .terraform (specific)
     - name: Restore .terraform (specific)
       id: tf_work_spec
       uses: actions/cache/restore@v3
@@ -96,27 +92,26 @@ runs:
         path: ${{ inputs.terraform-directory }}/.terraform
         key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-${{ steps.lockhash_pre.outputs.hash }}-${{ inputs.terraform-directory }}
 
-    # Workdir .terraform (generic fallback)
     - name: Restore .terraform (generic)
-      if: steps.tf_work_spec.outputs['cache-hit'] != 'true'
+      if: steps.tf_work_spec.outputs.cache-matched-key == ''
       id: tf_work_cache
       uses: actions/cache/restore@v3
       with:
         path: ${{ inputs.terraform-directory }}/.terraform
         key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-
+        restore-keys: |
+          ${{ runner.os }}-tf-workdir-
 
-    # Inspect caches
     - name: Inspect caches
       shell: bash
       run: |
-        echo "plugin specific cache-hit=${{ steps.tf_cache_spec.outputs.cache-hit }}"
-        echo "plugin generic  cache-hit=${{ steps.tf_cache.outputs.cache-hit }}"
-        echo "workdir specific cache-hit=${{ steps.tf_work_spec.outputs.cache-hit }}"
-        echo "workdir generic  cache-hit=${{ steps.tf_work_cache.outputs.cache-hit }}"
+        echo "plugin specific matched=${{ steps.tf_cache_spec.outputs.cache-matched-key }}"
+        echo "plugin generic  matched=${{ steps.tf_cache.outputs.cache-matched-key }}"
+        echo "workdir specific matched=${{ steps.tf_work_spec.outputs.cache-matched-key }}"
+        echo "workdir generic  matched=${{ steps.tf_work_cache.outputs.cache-matched-key }}"
         du -sh ~/.terraform.d/plugin-cache || true
         du -sh ${{ inputs.terraform-directory }}/.terraform || true
 
-    # Terraform init + provider lock
     - name: Terraform init
       working-directory: ${{ inputs.terraform-directory }}
       shell: bash
@@ -125,23 +120,19 @@ runs:
         arch=$(uname -m); [ "$arch" = "x86_64" ] && arch="amd64"
         terraform providers lock -platform=linux_${arch}
 
-    # ----- POST-INIT: compute real lockfile hash
+    # ---- POST-INIT LOCK HASH (definitely exists now)
     - name: Compute lockfile hash (post-init)
       id: lockhash_post
       shell: bash
       run: |
         set -e
         lf="${{ inputs.terraform-directory }}/.terraform.lock.hcl"
-        if [ ! -f "$lf" ]; then
-          echo "Lockfile missing after init at: $lf" >&2
-          exit 1
-        fi
         h=$(sha256sum "$lf" | awk '{print $1}')
         echo "hash=$h" >> "$GITHUB_OUTPUT"
 
-    # Save plugin cache (specific) — only if BOTH restores missed
+    # Save caches ONLY if no restore (exact or prefix) happened
     - name: Save plugin cache (specific)
-      if: steps.tf_cache_spec.outputs['cache-hit'] != 'true' && steps.tf_cache.outputs['cache-hit'] != 'true'
+      if: steps.tf_cache_spec.outputs.cache-matched-key == '' && steps.tf_cache.outputs.cache-matched-key == ''
       uses: actions/cache/save@v3
       with:
         path: ~/.terraform.d/plugin-cache
@@ -149,7 +140,7 @@ runs:
 
     # Save .terraform cache (specific) — only if BOTH restores missed
     - name: Save .terraform cache (specific)
-      if: steps.tf_work_spec.outputs['cache-hit'] != 'true' && steps.tf_work_cache.outputs['cache-hit'] != 'true'
+      if: steps.tf_work_spec.outputs.cache-matched-key == '' && steps.tf_work_cache.outputs.cache-matched-key == ''
       uses: actions/cache/save@v3
       with:
         path: ${{ inputs.terraform-directory }}/.terraform
