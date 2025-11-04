@@ -1,4 +1,4 @@
-name: (development) (development) EKS Karpenter Terraform Plan
+name: (development) EKS Karpenter Terraform Plan
 
 on:
   pull_request:
