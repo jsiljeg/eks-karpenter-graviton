@@ -15,12 +15,6 @@ inputs:
     description: "EKS cluster name (optional)"
     required: false
 
-outputs:
-  region:
-    description: "Resolved AWS region"
-  cluster:
-    description: "Resolved EKS cluster name"
-
 runs:
   using: "composite"
   steps:
@@ -36,34 +30,3 @@ runs:
         aws-access-key-id: ${{ inputs.aws-access-key-id }}
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
-
-    - name: Resolve region and cluster
-      id: resolve
-      shell: bash
-      run: |
-        set -euo pipefail
-        REGION="${{ inputs.aws-region }}"
-        CLUSTER="${{ inputs.cluster-name }}"
-
-        if [ -z "$REGION" ]; then
-          echo "::error::AWS region not provided (input aws-region)"
-          exit 1
-        fi
-
-        if [ -z "$CLUSTER" ]; then
-          echo "No cluster-name provided. Discovering in region: $REGION ..."
-          mapfile -t CLS < <(aws eks list-clusters --region "$REGION" --query 'clusters' --output text | tr '\t' '\n' | sed '/^$/d')
-          if [ "${#CLS[@]}" -eq 0 ]; then
-            echo "::error::No EKS clusters found in $REGION"
-            exit 1
-          elif [ "${#CLS[@]}" -eq 1 ]; then
-            CLUSTER="${CLS[0]}"
-            echo "Discovered single cluster: $CLUSTER"
-          else
-            echo "::error::Multiple clusters found in $REGION: ${CLS[*]}"
-            exit 1
-          fi
-        fi
-
-        echo "region=$REGION"   >> $GITHUB_OUTPUT
-        echo "cluster=$CLUSTER" >> $GITHUB_OUTPUT
