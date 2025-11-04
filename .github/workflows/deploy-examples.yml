@@ -68,8 +68,29 @@ jobs:
           CLUSTER_INPUT="${{ github.event.inputs.cluster-name }}"
           REGION="${REGION_INPUT:-${AWS_REGION:-}}"
           CLUSTER="${CLUSTER_INPUT:-${CLUSTER_NAME:-}}"
-          if [ -z "$REGION" ]; then echo "::error::AWS region not provided (input aws-region or secret AWS_REGION)"; exit 1; fi
-          if [ -z "$CLUSTER" ]; then echo "::error::EKS cluster name not provided (input cluster-name or secret EKS_CLUSTER_NAME)"; exit 1; fi
+
+          if [ -z "$REGION" ]; then
+            echo "::error::AWS region not provided (input aws-region or secret AWS_REGION)"
+            exit 1
+          fi
+
+          if [ -z "$CLUSTER" ]; then
+            echo "No cluster-name provided. Trying auto-discovery in region: $REGION ..."
+            # returns array; we’ll pick the only one if there’s exactly one
+            mapfile -t CLS < <(aws eks list-clusters --region "$REGION" --query 'clusters' --output text | tr '\t' '\n' | sed '/^$/d')
+            if [ "${#CLS[@]}" -eq 0 ]; then
+              echo "::error::No EKS clusters found in $REGION. Provide input cluster-name or set secret EKS_CLUSTER_NAME."
+              exit 1
+            elif [ "${#CLS[@]}" -eq 1 ]; then
+              CLUSTER="${CLS[0]}"
+              echo "Discovered single cluster: $CLUSTER"
+            else
+              echo "::error::Multiple clusters found in $REGION: ${CLS[*]}"
+              echo "Provide input cluster-name when starting the workflow."
+              exit 1
+            fi
+          fi
+
           echo "region=$REGION"   >> "$GITHUB_OUTPUT"
           echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
 
@@ -98,11 +119,6 @@ jobs:
           aws eks update-kubeconfig \
             --name "${{ steps.cfg.outputs.cluster }}" \
             --region "${{ steps.cfg.outputs.region }}"
-
-      - name: Cluster sanity
-        run: |
-          kubectl version --short
-          kubectl get nodes -o wide
 
       - name: Apply/Delete manifests
         id: apply
