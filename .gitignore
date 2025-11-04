@@ -1,0 +1,15 @@
+# local env files
+.env
+.terraform
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+
+#
+.DS_Store
+
+# infracost
+.infracost
+
+# jetbrains
+.idea

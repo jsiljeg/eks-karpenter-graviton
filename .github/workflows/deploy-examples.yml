@@ -1,0 +1,214 @@
+name: Deploy K8s Examples to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Choose whether to deploy a single file or a glob"
+        type: choice
+        options: [glob, file]
+        default: glob
+      path:
+        description: "File path (when mode=file) OR glob (when mode=glob)"
+        type: string
+        default: "examples/**/*.yaml"
+      namespace:
+        description: "Target namespace (will be created if missing)"
+        type: string
+        default: "default"
+      apply:
+        description: "Actually apply changes (false = diff/preview only)"
+        type: boolean
+        default: false
+      prune:
+        description: "Enable prune (removes orphaned objs with matching label)"
+        type: boolean
+        default: false
+      prune_label:
+        description: "Label selector to scope prune (e.g. managed-by=gha-examples)"
+        type: string
+        default: "managed-by=gha-examples"
+      wait:
+        description: "Wait for resources to become ready (kubectl wait)"
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write    # for OIDC to AWS
+  contents: read
+
+concurrency:
+  group: deploy-examples-${{ github.ref }}-${{ inputs.namespace }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+  MANAGED_LABEL: managed-by=gha-examples
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate required secrets
+        run: |
+          : "${AWS_REGION:?Set AWS_REGION secret}"
+          : "${CLUSTER_NAME:?Set CLUSTER_NAME secret}"
+          : "${{ secrets.AWS_ROLE_ARN }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Login to EKS
+        run: |
+          aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
+          kubectl version --client
+          kubectl cluster-info
+
+      - name: Ensure namespace exists
+        run: |
+          kubectl get ns "${{ inputs.namespace }}" >/dev/null 2>&1 || \
+          kubectl create ns "${{ inputs.namespace }}"
+
+      - name: Auth check (RBAC sanity)
+        run: |
+          kubectl auth can-i apply --namespace "${{ inputs.namespace }}" || {
+            echo "You don't have permission to apply in '${{ inputs.namespace }}'"; exit 1; }
+
+      - name: Resolve file set
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODE="${{ inputs.mode }}"
+          PATH_IN="${{ inputs.path }}"
+          if [[ "$MODE" == "file" ]]; then
+            [[ -f "$PATH_IN" ]] || { echo "::error::File not found: $PATH_IN"; exit 1; }
+            echo "$PATH_IN" > /tmp/filelist.txt
+          else
+            # glob mode
+            mapfile -t FILES < <(git ls-files "$PATH_IN")
+            if [[ ${#FILES[@]} -eq 0 ]]; then
+              echo "::error::No files matched glob: $PATH_IN"; exit 1;
+            fi
+            printf "%s\n" "${FILES[@]}" > /tmp/filelist.txt
+          fi
+          echo "count=$(wc -l </tmp/filelist.txt | xargs)" >> "$GITHUB_OUTPUT"
+
+      - name: Show planned files
+        run: |
+          echo "Will operate on $(wc -l </tmp/filelist.txt | xargs) file(s):"
+          nl -ba /tmp/filelist.txt
+        continue-on-error: true
+
+      - name: Diff (server-side)
+        id: diff
+        shell: bash
+        env:
+          NS: ${{ inputs.namespace }}
+        run: |
+          set -euo pipefail
+          echo "### kubectl diff (server-side) in ns=${NS}" >> $GITHUB_STEP_SUMMARY
+          any_changes=0
+          while read -r f; do
+            echo "----- DIFF $f -----"
+            # Add a management label via kustomize-on-the-fly using kubectl --dry-run=server annotate?
+            # Simpler: rely on apply step to set label; diff reads raw files.
+            if kubectl diff -n "$NS" -f "$f" --server-side --field-manager=gha-examples; then
+              echo "No diff for $f" >> $GITHUB_STEP_SUMMARY
+            else
+              code=$?
+              if [[ $code -eq 1 ]]; then
+                any_changes=1
+                echo "- changes in \`$f\`" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "::error::kubectl diff error ($code) on $f"
+                exit $code
+              fi
+            fi
+          done </tmp/filelist.txt
+          echo "any_changes=$any_changes" >> "$GITHUB_OUTPUT"
+
+      - name: Apply (server-side)
+        if: ${{ inputs.apply }}
+        shell: bash
+        env:
+          NS: ${{ inputs.namespace }}
+          PRUNE: ${{ inputs.prune }}
+          PRUNE_LABEL: ${{ inputs.prune_label }}
+          MANAGED_LABEL: ${{ env.MANAGED_LABEL }}
+        run: |
+          set -euo pipefail
+          # Apply each file with a management label so prune can be safely scoped later.
+          while read -r f; do
+            echo "----- APPLY $f -----"
+            # Add/override managed-by label during server-side apply
+            kubectl apply -n "$NS" -f "$f" \
+              --server-side \
+              --field-manager=gha-examples \
+              --force-conflicts=false
+          done </tmp/filelist.txt
+
+          # Stamp label across applied resources (safe, idempotent) for prune scoping
+          # We annotate the namespace so we can label-select within it.
+          # Note: applying labels at creation time per-object would require editing files or kustomize.
+          # The loop below finds GVKs from the files and labels live objs.
+          while read -r f; do
+            # Extract kinds and names from the file for labeling (best-effort)
+            kubectl create --dry-run=client -f "$f" -o json | \
+              jq -r '.items[]? | [.kind, .metadata.name] | @tsv' | while IFS=$'\t' read -r kind name; do
+                [[ -z "$kind" || -z "$name" ]] && continue
+                kubectl label -n "$NS" "$kind/$name" "$MANAGED_LABEL" --overwrite || true
+              done
+          done </tmp/filelist.txt
+
+          if [[ "$PRUNE" == "true" ]]; then
+            echo "----- PRUNE ----- Pruning resources in ns=$NS with label selector: $PRUNE_LABEL"
+            # Prune only things with the given label; requires also applying a directory/set,
+            # so we re-apply the set and let --prune do the deletion of orphans with the label.
+            # For prune to work, kubectl needs a directory or multiple -f; feed the list:
+            # Build args: multiple -f entries
+            mapfile -t files < /tmp/filelist.txt
+            args=()
+            for f in "${files[@]}"; do args+=("-f" "$f"); done
+            kubectl apply -n "$NS" "${args[@]}" \
+              --server-side \
+              --field-manager=gha-examples \
+              --prune \
+              -l "$PRUNE_LABEL"
+          fi
+
+      - name: Wait for readiness
+        if: ${{ inputs.apply && inputs.wait }}
+        shell: bash
+        env:
+          NS: ${{ inputs.namespace }}
+        run: |
+          set -euo pipefail
+          # Best-effort waits by common kinds
+          kubectl -n "$NS" get deploy >/dev/null 2>&1 && \
+            kubectl -n "$NS" wait --for=condition=available deploy --all --timeout=5m || true
+          kubectl -n "$NS" get statefulset >/dev/null 2>&1 && \
+            kubectl -n "$NS" wait --for=condition=ready statefulset --all --timeout=5m || true
+          kubectl -n "$NS" get daemonset >/dev/null 2>&1 && \
+            kubectl -n "$NS" rollout status daemonset --all --timeout=5m || true
+
+      - name: Summary
+        run: |
+          echo "### Result" >> $GITHUB_STEP_SUMMARY
+          echo "- Mode: \`${{ inputs.mode }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Path: \`${{ inputs.path }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Namespace: \`${{ inputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Apply: \`${{ inputs.apply }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Prune: \`${{ inputs.prune }}\` (label=\`${{ inputs.prune_label }}\`)" >> $GITHUB_STEP_SUMMARY
+          echo "- Files: ${{ steps.files.outputs.count }}" >> $GITHUB_STEP_SUMMARY

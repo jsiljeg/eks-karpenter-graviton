@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-arch-generic
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-arch-generic
+  template:
+    metadata:
+      labels:
+        app: demo-arch-generic
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: arm64
+        karpenter.sh/capacity-type: spot
+      containers:
+      - name: pause
+        image: public.ecr.aws/eks-distro/kubernetes/pause:3.8

@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-arm64
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-arm64
+  template:
+    metadata:
+      labels:
+        app: demo-arm64
+    spec:
+      nodeSelector:
+        karpenter.sh/nodepool: np-arm64-spot
+      containers:
+      - name: pause
+        image: public.ecr.aws/eks-distro/kubernetes/pause:3.8
