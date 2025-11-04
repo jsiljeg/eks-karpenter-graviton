@@ -13,7 +13,7 @@ variable "eks_version" {
 variable "karpenter_version" {
   description = "Karpenter chart & CRD version"
   type        = string
-  default     = "1.8.0"
+  default     = "1.8.1"
 }
 
 variable "capacity_type" {
