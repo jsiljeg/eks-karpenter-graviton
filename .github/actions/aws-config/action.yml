@@ -8,6 +8,12 @@ inputs:
   cluster-name:
     description: "EKS cluster name (optional)"
     required: false
+  aws-access-key-id:
+    description: "AWS access key ID"
+    required: true
+  aws-secret-access-key:
+    description: "AWS secret access key"
+    required: true
 
 outputs:
   region:
@@ -18,24 +24,25 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Validate required secrets
+    - name: Validate AWS credentials presence
       shell: bash
       run: |
-        test -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || { echo "::error::AWS_ACCESS_KEY_ID missing"; exit 1; }
-        test -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" || { echo "::error::AWS_SECRET_ACCESS_KEY missing"; exit 1; }
+        test -n "${{ inputs.aws-access-key-id }}" || { echo "::error::Missing AWS_ACCESS_KEY_ID"; exit 1; }
+        test -n "${{ inputs.aws-secret-access-key }}" || { echo "::error::Missing AWS_SECRET_ACCESS_KEY"; exit 1; }
 
     - name: Resolve inputs/env (region & cluster)
       id: cfg
       shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
       run: |
         set -euo pipefail
-        REGION_INPUT="${{ inputs.aws-region }}"
-        CLUSTER_INPUT="${{ inputs.cluster-name }}"
-        REGION="${REGION_INPUT:-${AWS_REGION:-}}"
-        CLUSTER="${CLUSTER_INPUT:-${CLUSTER_NAME:-}}"
+        REGION="${AWS_REGION:-}"
+        CLUSTER="${CLUSTER_NAME:-}"
 
         if [ -z "$REGION" ]; then
-          echo "::error::AWS region not provided (input aws-region or secret AWS_REGION)"
+          echo "::error::AWS region not provided (input aws-region)"
           exit 1
         fi
 
@@ -49,17 +56,17 @@ runs:
             CLUSTER="${CLS[0]}"
             echo "Discovered single cluster: $CLUSTER"
           else
-            echo "::error::Multiple clusters found: ${CLS[*]}"
+            echo "::error::Multiple clusters found in $REGION: ${CLS[*]}"
             exit 1
           fi
         fi
 
-        echo "region=$REGION" >> "$GITHUB_OUTPUT"
+        echo "region=$REGION"   >> "$GITHUB_OUTPUT"
         echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
 
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ steps.cfg.outputs.region }}

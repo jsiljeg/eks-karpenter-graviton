@@ -26,11 +26,12 @@ on:
         type: boolean
         default: true
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     steps:
       - uses: actions/checkout@v4
@@ -39,8 +40,10 @@ jobs:
         id: cfg
         uses: ./.github/actions/aws-config
         with:
-          aws-region: ${{ github.event.inputs.aws-region }}
-          cluster-name: ${{ github.event.inputs.cluster-name }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event.inputs.aws-region || secrets.AWS_REGION }}
+          cluster-name: ${{ github.event.inputs.cluster-name || secrets.CLUSTER_NAME }}
 
       - name: Setup kubeconfig
         uses: ./.github/actions/kubeconfig
