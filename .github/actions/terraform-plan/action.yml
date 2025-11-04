@@ -110,6 +110,22 @@ runs:
         arch=$(uname -m); [ "$arch" = "x86_64" ] && arch="amd64"
         terraform providers lock -platform=linux_${arch}
 
+    # Save plugin cache with the now-known specific key (after lockfile exists)
+    - name: Save plugin cache (specific)
+      if: steps.tf_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v3
+      with:
+        path: ~/.terraform.d/plugin-cache
+        key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}
+
+    # Save .terraform/modules/providers dir with specific key (after init)
+    - name: Save .terraform cache (specific)
+      if: steps.tf_work_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v3
+      with:
+        path: ${{ inputs.terraform-directory }}/.terraform
+        key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}-${{ inputs.terraform-directory }}
+
     # Terraform Plan
     - name: TF validate
       working-directory: ${{ inputs.terraform-directory }}
