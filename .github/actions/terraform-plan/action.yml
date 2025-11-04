@@ -51,12 +51,48 @@ runs:
         mkdir -p $HOME/.terraform.d/plugin-cache
       shell: bash
 
+    - name: Cache .terraform dir (modules/providers)
+      id: tf_work_cache
+      uses: actions/cache@v3
+      with:
+        path: ${{ inputs.terraform-directory }}/.terraform
+        key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}-${{ inputs.terraform-directory }}
+        restore-keys: |
+          ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-
+
+    - name: Test cache hit
+      run: echo "workdir cache-hit=${{ steps.tf_work_cache.outputs.cache-hit }}"
+      shell: bash
+
+    - name: Inspect caches
+      shell: bash
+      run: |
+        echo "workdir cache-hit=${{ steps.tf_work_cache.outputs.cache-hit }}"
+        echo "plugin cache-hit=${{ steps.tf_cache.outputs.cache-hit }}"
+        du -sh ~/.terraform.d/plugin-cache || true
+        du -sh ${{ inputs.terraform-directory }}/.terraform || true
+
     - name: Use Terraform plugin cache
+      id: tf_cache
       uses: actions/cache@v3
       with:
         path: ~/.terraform.d/plugin-cache
-        key: ${{ runner.os }}-tf-plugin-cache-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}
-        restore-keys: ${{ runner.os }}-tf-plugin-cache-
+        key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}
+        restore-keys: |
+          ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-
+          ${{ runner.os }}-tf-plugin-cache-
+
+    - name: Test cache hit
+      run: echo "plugin cache-hit=${{ steps.tf_cache.outputs.cache-hit }}"
+      shell: bash
+
+    - name: Inspect caches
+      shell: bash
+      run: |
+        echo "workdir cache-hit=${{ steps.tf_work_cache.outputs.cache-hit }}"
+        echo "plugin cache-hit=${{ steps.tf_cache.outputs.cache-hit }}"
+        du -sh ~/.terraform.d/plugin-cache || true
+        du -sh ${{ inputs.terraform-directory }}/.terraform || true
 
     - name: Terraform provider cache work-around
       working-directory: ${{ inputs.terraform-directory }}
@@ -67,10 +103,12 @@ runs:
 
     - name: Terraform init
       working-directory: ${{ inputs.terraform-directory }}
+      shell: bash
       run: |
         terraform init
-        terraform providers lock -platform=linux_amd64
-      shell: bash
+        # lock for current runner platform
+        arch=$(uname -m); [ "$arch" = "x86_64" ] && arch="amd64"
+        terraform providers lock -platform=linux_${arch}
 
     # Terraform Plan
     - name: TF validate

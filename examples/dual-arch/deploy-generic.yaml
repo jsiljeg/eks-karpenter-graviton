@@ -12,9 +12,6 @@ spec:
       labels:
         app: demo-arch-generic
     spec:
-      nodeSelector:
-        kubernetes.io/arch: arm64
-        karpenter.sh/capacity-type: spot
       containers:
       - name: pause
         image: public.ecr.aws/eks-distro/kubernetes/pause:3.8
