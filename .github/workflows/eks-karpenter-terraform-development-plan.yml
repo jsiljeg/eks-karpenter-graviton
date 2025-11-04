@@ -1,0 +1,43 @@
+name: (development) (development) EKS Karpenter Terraform Plan
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "terraform/environments/development/aws/eu-central-1/eks-karpenter/**"
+      - "terraform/modules/eks-karpenter/**"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  pull-requests: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  terraform-version: 1.10.3
+  terraform-directory: "terraform/environments/development/aws"
+
+run-name: ${{ github.workflow }} by @${{ github.actor }} from ${{ github.ref_name }}
+
+jobs:
+  terraform_plan_dev:
+    name: Terraform Plan Development
+    runs-on: ubuntu-latest
+    environment: development  
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform plan
+        uses: ./.github/actions/terraform-plan
+        with:
+          environment: development
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          terraform-directory: "${{ env.terraform-directory }}/${{ secrets.AWS_REGION }}/eks-karpenter"

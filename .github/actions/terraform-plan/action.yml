@@ -1,0 +1,107 @@
+name: terraform plan
+description: Terraform Validate and Plan
+
+inputs:
+  aws-access-key-id:
+    description: This input is required if running in the GitHub hosted environment.
+    required: true
+  aws-secret-access-key:
+    description: This input is required if running in the GitHub hosted environment.
+    required: true
+  aws-region:
+    description: AWS Region - e.g. eu-central-1
+    required: true
+  environment:
+    description: The Cloud Environment to run
+    required: true
+  terraform-directory:
+    description: Directory where Terraform config is located
+    required: false
+    default: '.'
+  terraform-plan-output:
+    description: Terraform plan output file
+    required: false
+    default: 'github-actions.tfplan'
+  terraform-version:
+    description: Terraform version to use
+    required: false
+    default: 1.10.3
+
+runs:
+  using: composite
+  steps:
+    # Login to AWS
+    - name: AWS Login
+      uses: ./.github/actions/aws-config
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    # Initialize Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform-version }}
+        terraform_wrapper: true
+
+    - name: Configure Terraform plugin cache
+      run: |
+        echo 'plugin_cache_dir="$HOME/.terraform.d/plugin-cache"' > $HOME/.terraformrc
+        mkdir -p $HOME/.terraform.d/plugin-cache
+      shell: bash
+
+    - name: Use Terraform plugin cache
+      uses: actions/cache@v3
+      with:
+        path: ~/.terraform.d/plugin-cache
+        key: ${{ runner.os }}-tf-plugin-cache-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}
+        restore-keys: ${{ runner.os }}-tf-plugin-cache-
+
+    - name: Terraform provider cache work-around
+      working-directory: ${{ inputs.terraform-directory }}
+      run: |
+        terraform init
+      shell: bash
+      continue-on-error: true
+
+    - name: Terraform init
+      working-directory: ${{ inputs.terraform-directory }}
+      run: |
+        terraform init
+        terraform providers lock -platform=linux_amd64
+      shell: bash
+
+    # Terraform Plan
+    - name: TF validate
+      working-directory: ${{ inputs.terraform-directory }}
+      run: terraform validate
+      shell: bash
+
+    - name: Terraform plan
+      id: tfplan
+      working-directory: ${{ inputs.terraform-directory }}
+      shell: bash
+      run: |
+        terraform plan -no-color -out=${{ inputs.terraform-plan-output }} > /dev/null
+        terraform show -no-color ${{ inputs.terraform-plan-output }} > tfplan_output.txt
+
+    - name: Display Terraform plan on summary
+      working-directory: ${{ inputs.terraform-directory }}
+      shell: bash
+      run: |
+        echo "### Terraform Plan on ${{ inputs.environment }} from $GITHUB_REF_NAME :rocket:" >> $GITHUB_STEP_SUMMARY
+        echo '```terraform' >> $GITHUB_STEP_SUMMARY
+        cat tfplan_output.txt >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: Fail if Terraform plan failed
+      if: steps.tfplan.outcome != 'success'
+      working-directory: ${{ inputs.terraform-directory }}
+      shell: bash
+      run: |
+        echo "### Terraform Plan ERROR on ${{ inputs.environment }} from $GITHUB_REF_NAME :x:" >> $GITHUB_STEP_SUMMARY
+        echo '```terraform' >> $GITHUB_STEP_SUMMARY
+        terraform plan -no-color || true >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        exit 1
