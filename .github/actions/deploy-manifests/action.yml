@@ -1,83 +1,72 @@
-name: "Deploy or Delete Kubernetes Manifests"
-description: "Applies or deletes manifests and optionally waits for rollouts"
+name: "Apply or delete Kubernetes manifests"
+description: "Apply or delete YAML files with optional rollout wait"
 
 inputs:
   file:
-    description: "Manifest path or glob"
+    description: "Path or glob to YAML manifests"
     required: true
   namespace:
-    description: "Namespace to target"
-    default: "default"
+    description: "Target namespace"
+    required: true
   action:
     description: "apply or delete"
-    default: "apply"
+    required: true
   wait:
-    description: "Wait for rollout completion"
+    description: "Wait for rollouts to complete"
+    required: false
     default: "true"
 
 runs:
   using: "composite"
   steps:
-    - name: Apply/Delete manifests
+    - name: Apply or delete manifests
       shell: bash
-      env:
-        NS: ${{ inputs.namespace }}
-        FILE_IN: ${{ inputs.file }}
-        ACTION: ${{ inputs.action }}
-        MANAGED_LABEL: managed-by=gha-examples
       run: |
         set -euo pipefail
         shopt -s nullglob
+
+        NS="${{ inputs.namespace }}"
+        ACTION="${{ inputs.action }}"
+        FILE_IN="${{ inputs.file }}"
+        MANAGED_LABEL="managed-by=gha-examples"
+
         mapfile -t FILES < <(eval echo "$FILE_IN")
         if [ ${#FILES[@]} -eq 0 ]; then
           echo "::error::No files matched: $FILE_IN"
           exit 1
         fi
 
-        echo "Target namespace: ${NS}"
-        kubectl get ns "${NS}" >/dev/null 2>&1 || kubectl create ns "${NS}"
+        echo "Target namespace: $NS"
+        kubectl get ns "$NS" >/dev/null 2>&1 || kubectl create ns "$NS"
 
         for f in "${FILES[@]}"; do
           echo "::group::${ACTION^^}: $f"
           if [ "$ACTION" = "apply" ]; then
-            kubectl apply --server-side --force-conflicts -n "${NS}" -f "$f"
-            kubectl -n "${NS}" get -f "$f" -o name \
-              | xargs -r -n1 -I{} kubectl -n "${NS}" label --overwrite {} "$MANAGED_LABEL" || echo "warn: label best-effort"
+            kubectl apply --server-side --force-conflicts -n "$NS" -f "$f"
+            kubectl -n "$NS" get -f "$f" -o name | xargs -r -n1 -I{} kubectl -n "$NS" label --overwrite {} "$MANAGED_LABEL" || echo "warn: labeling skipped"
           else
-            kubectl delete -n "${NS}" -f "$f" --ignore-not-found=true
+            kubectl delete -n "$NS" -f "$f" --ignore-not-found=true
           fi
           echo "::endgroup::"
         done
 
-    - name: Wait for rollouts
-      if: ${{ inputs.wait == 'true' && inputs.action == 'apply' }}
+    - name: Wait for rollout (if requested)
+      if: ${{ inputs.action == 'apply' && inputs.wait == 'true' }}
       shell: bash
-      env:
-        NS: ${{ inputs.namespace }}
-        FILE_IN: ${{ inputs.file }}
       run: |
         set -euo pipefail
+        NS="${{ inputs.namespace }}"
+        FILE_IN="${{ inputs.file }}"
         shopt -s nullglob
         mapfile -t FILES < <(eval echo "$FILE_IN")
+
         for f in "${FILES[@]}"; do
-          for name in $(kubectl -n "$NS" get -f "$f" -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.name}{"\n"}{end}'); do
-            echo "Waiting for Deployment/$name rollout…"
-            kubectl -n "$NS" rollout status deploy "$name" --timeout=5m || true
+          for d in $(kubectl -n "$NS" get -f "$f" --ignore-not-found -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.name}{"\n"}{end}'); do
+            echo "Waiting for Deployment/$d rollout…"
+            kubectl -n "$NS" rollout status deploy "$d" --timeout=5m
           done
-          for name in $(kubectl -n "$NS" get -f "$f" -o jsonpath='{range .items[?(@.kind=="StatefulSet")]}{.metadata.name}{"\n"}{end}'); do
-            echo "Waiting for StatefulSet/$name rollout…"
-            kubectl -n "$NS" rollout status sts "$name" --timeout=10m || true
+          for s in $(kubectl -n "$NS" get -f "$f" --ignore-not-found -o jsonpath='{range .items[?(@.kind=="StatefulSet")]}{.metadata.name}{"\n"}{end}'); do
+            echo "Waiting for StatefulSet/$s rollout…"
+            kubectl -n "$NS" rollout status sts "$s" --timeout=10m
           done
         done
-
-    - name: Summary
-      if: ${{ inputs.action == 'apply' }}
-      shell: bash
-      env:
-        NS: ${{ inputs.namespace }}
-      run: |
-        echo "Nodes (arch & capacity-type):"
-        kubectl get nodes -L kubernetes.io/arch,karpenter.sh/capacity-type
-        echo
-        echo "Deployments in namespace '${NS}':"
-        kubectl -n "${NS}" get deploy -o wide || true

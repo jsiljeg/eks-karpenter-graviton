@@ -3,31 +3,31 @@ name: Deploy Karpenter Examples
 on:
   workflow_dispatch:
     inputs:
-      aws-region:
-        description: "AWS region"
-        required: false
-      cluster-name:
-        description: "EKS cluster name"
-        required: false
       file:
-        description: "Path or glob to manifests"
+        description: "Path or glob to manifest(s) (e.g. examples/dual-arch/deploy-amd64.yaml)"
         required: true
         default: "examples/dual-arch/deploy-amd64.yaml"
       namespace:
-        description: "Target namespace"
+        description: "Kubernetes namespace to target"
+        required: false
         default: "default"
       action:
-        description: "Apply or Delete"
+        description: "Apply or Delete the manifests"
         type: choice
         options: [apply, delete]
         default: apply
       wait:
-        description: "Wait for rollouts"
+        description: "Wait for rollout completion"
         type: boolean
         default: true
 
 permissions:
   contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+  MANAGED_LABEL: managed-by=gha-examples
 
 jobs:
   deploy:
@@ -36,22 +36,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS and resolve cluster
-        id: cfg
-        uses: ./.github/actions/aws-config
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ github.event.inputs.aws-region || secrets.AWS_REGION }}
-          cluster-name: ${{ github.event.inputs.cluster-name || secrets.CLUSTER_NAME }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup kubeconfig
         uses: ./.github/actions/kubeconfig
         with:
-          region: ${{ steps.cfg.outputs.region }}
-          cluster: ${{ steps.cfg.outputs.cluster }}
+          cluster-name: ${{ secrets.CLUSTER_NAME }}
+          region: ${{ secrets.AWS_REGION }}
 
-      - name: Deploy manifests
+      - name: Deploy or delete manifests
         uses: ./.github/actions/deploy-manifests
         with:
           file: ${{ github.event.inputs.file }}

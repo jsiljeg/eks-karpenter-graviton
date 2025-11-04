@@ -1,11 +1,11 @@
 name: "Setup kubeconfig for EKS"
-description: "Install kubectl and configure kubeconfig for the given EKS cluster"
+description: "Install kubectl and configure kubeconfig for the cluster"
 
 inputs:
   region:
     description: "AWS region"
     required: true
-  cluster:
+  cluster-name:
     description: "EKS cluster name"
     required: true
 
@@ -21,5 +21,5 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        echo "Setting up kubeconfig for cluster=${{ inputs.cluster }} region=${{ inputs.region }}"
-        aws eks update-kubeconfig --name "${{ inputs.cluster }}" --region "${{ inputs.region }}"
+        echo "Setting up kubeconfig for cluster=${{ inputs.cluster-name }} region=${{ inputs.region }}"
+        aws eks update-kubeconfig --name "${{ inputs.cluster-name }}" --region "${{ inputs.region }}"
