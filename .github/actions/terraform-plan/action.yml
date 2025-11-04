@@ -79,7 +79,7 @@ runs:
 
     # Plugin cache (generic fallback)
     - name: Restore plugin cache (generic)
-      if: steps.tf_cache_spec.outputs.cache-hit != 'true'
+      if: steps.tf_cache_spec.outputs['cache-hit'] != 'true'
       id: tf_cache
       uses: actions/cache/restore@v3
       with:
@@ -98,7 +98,7 @@ runs:
 
     # Workdir .terraform (generic fallback)
     - name: Restore .terraform (generic)
-      if: steps.tf_work_spec.outputs.cache-hit != 'true'
+      if: steps.tf_work_spec.outputs['cache-hit'] != 'true'
       id: tf_work_cache
       uses: actions/cache/restore@v3
       with:
@@ -139,17 +139,17 @@ runs:
         h=$(sha256sum "$lf" | awk '{print $1}')
         echo "hash=$h" >> "$GITHUB_OUTPUT"
 
-    # Save plugin cache (specific)
+    # Save plugin cache (specific) — only if BOTH restores missed
     - name: Save plugin cache (specific)
-      if: steps.tf_cache_spec.outputs.cache-hit != 'true' || steps.lockhash_pre.outputs.hash != steps.lockhash_post.outputs.hash
+      if: steps.tf_cache_spec.outputs['cache-hit'] != 'true' && steps.tf_cache.outputs['cache-hit'] != 'true'
       uses: actions/cache/save@v3
       with:
         path: ~/.terraform.d/plugin-cache
         key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-${{ steps.lockhash_post.outputs.hash }}
 
-    # Save .terraform cache (specific)
+    # Save .terraform cache (specific) — only if BOTH restores missed
     - name: Save .terraform cache (specific)
-      if: steps.tf_work_spec.outputs.cache-hit != 'true' || steps.lockhash_pre.outputs.hash != steps.lockhash_post.outputs.hash
+      if: steps.tf_work_spec.outputs['cache-hit'] != 'true' && steps.tf_work_cache.outputs['cache-hit'] != 'true'
       uses: actions/cache/save@v3
       with:
         path: ${{ inputs.terraform-directory }}/.terraform
