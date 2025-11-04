@@ -52,18 +52,17 @@ runs:
         echo 'plugin_cache_dir="$HOME/.terraform.d/plugin-cache"' > "$HOME/.terraformrc"
         mkdir -p "$HOME/.terraform.d/plugin-cache"
 
-    # ---- Cache restore (specific lookup first, then generic fallback)
+    # ----- RESTORE CACHES (download them, not lookup-only) -----
 
-    # Plugin cache (specific lookup-only by lockfile hash)
+    # Plugin cache: try SPECIFIC (lockfile-hashed) first
     - name: Restore plugin cache (specific)
       id: tf_cache_spec
       uses: actions/cache/restore@v3
       with:
         path: ~/.terraform.d/plugin-cache
         key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}
-        lookup-only: true
 
-    # Plugin cache (generic fallback)
+    # Plugin cache: fall back to GENERIC if specific missed
     - name: Restore plugin cache (generic)
       if: steps.tf_cache_spec.outputs.cache-hit != 'true'
       id: tf_cache
@@ -74,16 +73,15 @@ runs:
         restore-keys: |
           ${{ runner.os }}-tf-plugin-cache-
 
-    # .terraform working dir (specific lookup-only by lockfile hash)
+    # .terraform workdir: try SPECIFIC (lockfile-hashed) first
     - name: Restore .terraform (specific)
       id: tf_work_spec
       uses: actions/cache/restore@v3
       with:
         path: ${{ inputs.terraform-directory }}/.terraform
         key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}-${{ inputs.terraform-directory }}
-        lookup-only: true
 
-    # .terraform working dir (generic fallback)
+    # .terraform workdir: fall back to GENERIC if specific missed
     - name: Restore .terraform (generic)
       if: steps.tf_work_spec.outputs.cache-hit != 'true'
       id: tf_work_cache
@@ -101,7 +99,7 @@ runs:
         arch=$(uname -m); [ "$arch" = "x86_64" ] && arch="amd64"
         terraform providers lock -platform=linux_${arch}
 
-    # ---- Save specific caches after lockfile exists (so next run hits specific key)
+    # ----- SAVE SPECIFIC CACHES after lockfile exists -----
 
     - name: Save plugin cache (specific)
       if: steps.tf_cache_spec.outputs.cache-hit != 'true'
