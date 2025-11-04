@@ -1,0 +1,65 @@
+name: "Configure AWS & Resolve Cluster"
+description: "Validate credentials, resolve AWS region & EKS cluster, and configure AWS access."
+
+inputs:
+  aws-region:
+    description: "AWS region (optional)"
+    required: false
+  cluster-name:
+    description: "EKS cluster name (optional)"
+    required: false
+
+outputs:
+  region:
+    description: "Resolved AWS region"
+  cluster:
+    description: "Resolved EKS cluster name"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate required secrets
+      shell: bash
+      run: |
+        test -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || { echo "::error::AWS_ACCESS_KEY_ID missing"; exit 1; }
+        test -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" || { echo "::error::AWS_SECRET_ACCESS_KEY missing"; exit 1; }
+
+    - name: Resolve inputs/env (region & cluster)
+      id: cfg
+      shell: bash
+      run: |
+        set -euo pipefail
+        REGION_INPUT="${{ inputs.aws-region }}"
+        CLUSTER_INPUT="${{ inputs.cluster-name }}"
+        REGION="${REGION_INPUT:-${AWS_REGION:-}}"
+        CLUSTER="${CLUSTER_INPUT:-${CLUSTER_NAME:-}}"
+
+        if [ -z "$REGION" ]; then
+          echo "::error::AWS region not provided (input aws-region or secret AWS_REGION)"
+          exit 1
+        fi
+
+        if [ -z "$CLUSTER" ]; then
+          echo "No cluster-name provided. Trying auto-discovery in region: $REGION ..."
+          mapfile -t CLS < <(aws eks list-clusters --region "$REGION" --query 'clusters' --output text | tr '\t' '\n' | sed '/^$/d')
+          if [ "${#CLS[@]}" -eq 0 ]; then
+            echo "::error::No EKS clusters found in $REGION"
+            exit 1
+          elif [ "${#CLS[@]}" -eq 1 ]; then
+            CLUSTER="${CLS[0]}"
+            echo "Discovered single cluster: $CLUSTER"
+          else
+            echo "::error::Multiple clusters found: ${CLS[*]}"
+            exit 1
+          fi
+        fi
+
+        echo "region=$REGION" >> "$GITHUB_OUTPUT"
+        echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ steps.cfg.outputs.region }}

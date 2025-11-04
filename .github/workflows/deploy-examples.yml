@@ -4,186 +4,54 @@ on:
   workflow_dispatch:
     inputs:
       aws-region:
-        description: "AWS region (overrides secret if set)"
+        description: "AWS region"
         required: false
-        default: ""
       cluster-name:
-        description: "EKS cluster name (overrides default if set)"
+        description: "EKS cluster name"
         required: false
-        default: ""
       file:
-        description: "Path or glob to manifest(s) (e.g. examples/dual-arch/deploy-amd64.yaml or examples/**/*.yaml)"
+        description: "Path or glob to manifests"
         required: true
         default: "examples/dual-arch/deploy-amd64.yaml"
       namespace:
-        description: "Kubernetes namespace to target"
-        required: false
+        description: "Target namespace"
         default: "default"
       action:
-        description: "Apply or Delete the manifests"
+        description: "Apply or Delete"
         type: choice
-        options:
-          - apply
-          - delete
-        required: true
+        options: [apply, delete]
         default: apply
       wait:
-        description: "Wait for rollouts to complete (Deployments/StatefulSets)"
+        description: "Wait for rollouts"
         type: boolean
-        required: true
         default: true
-
-permissions:
-  contents: read
-
-env:
-  # Fallbacks; you can set these secrets or override via workflow inputs
-  AWS_REGION: ${{ secrets.AWS_REGION }}
-  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
-  MANAGED_LABEL: managed-by=gha-examples
-
-concurrency:
-  group: deploy-karpenter-examples
-  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Validate required secrets
-        run: |
-          test -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || { echo "::error::AWS_ACCESS_KEY_ID missing"; exit 1; }
-          test -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" || { echo "::error::AWS_SECRET_ACCESS_KEY missing"; exit 1; }
-
-      - name: Resolve inputs/env (region & cluster)
+      - name: Configure AWS and resolve cluster
         id: cfg
-        shell: bash
-        run: |
-          set -euo pipefail
-          REGION_INPUT="${{ github.event.inputs.aws-region }}"
-          CLUSTER_INPUT="${{ github.event.inputs.cluster-name }}"
-          REGION="${REGION_INPUT:-${AWS_REGION:-}}"
-          CLUSTER="${CLUSTER_INPUT:-${CLUSTER_NAME:-}}"
-
-          if [ -z "$REGION" ]; then
-            echo "::error::AWS region not provided (input aws-region or secret AWS_REGION)"
-            exit 1
-          fi
-
-          if [ -z "$CLUSTER" ]; then
-            echo "No cluster-name provided. Trying auto-discovery in region: $REGION ..."
-            # returns array; we’ll pick the only one if there’s exactly one
-            mapfile -t CLS < <(aws eks list-clusters --region "$REGION" --query 'clusters' --output text | tr '\t' '\n' | sed '/^$/d')
-            if [ "${#CLS[@]}" -eq 0 ]; then
-              echo "::error::No EKS clusters found in $REGION. Provide input cluster-name or set secret CLUSTER_NAME."
-              exit 1
-            elif [ "${#CLS[@]}" -eq 1 ]; then
-              CLUSTER="${CLS[0]}"
-              echo "Discovered single cluster: $CLUSTER"
-            else
-              echo "::error::Multiple clusters found in $REGION: ${CLS[*]}"
-              echo "Provide input cluster-name when starting the workflow."
-              exit 1
-            fi
-          fi
-
-          echo "region=$REGION"   >> "$GITHUB_OUTPUT"
-          echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
-
-      - name: Configure AWS credentials (static keys)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: ./.github/actions/aws-config
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ steps.cfg.outputs.region }}
+          aws-region: ${{ github.event.inputs.aws-region }}
+          cluster-name: ${{ github.event.inputs.cluster-name }}
 
-      - name: Who am I?
-        run: aws sts get-caller-identity
-
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
+      - name: Setup kubeconfig
+        uses: ./.github/actions/kubeconfig
         with:
-          version: "latest"
+          cluster: ${{ steps.cfg.outputs.cluster }}
+          region: ${{ steps.cfg.outputs.region }}
 
-      - name: Install Helm (optional, handy)
-        uses: azure/setup-helm@v4
+      - name: Deploy manifests
+        uses: ./.github/actions/deploy-manifests
         with:
-          version: "latest"
-
-      - name: Update kubeconfig for EKS
-        run: |
-          aws eks update-kubeconfig \
-            --name "${{ steps.cfg.outputs.cluster }}" \
-            --region "${{ steps.cfg.outputs.region }}"
-
-      - name: Apply/Delete manifests
-        id: apply
-        shell: bash
-        env:
-          NS: ${{ github.event.inputs.namespace }}
-          FILE_IN: ${{ github.event.inputs.file }}
-          ACTION: ${{ github.event.inputs.action }}
-        run: |
-          set -euo pipefail
-
-          # Expand globs; error if nothing matches
-          shopt -s nullglob
-          mapfile -t FILES < <(eval echo "$FILE_IN")
-          if [ ${#FILES[@]} -eq 0 ]; then
-            echo "::error::No files matched: $FILE_IN"
-            exit 1
-          fi
-
-          echo "Target namespace: ${NS}"
-          kubectl get ns "${NS}" >/dev/null 2>&1 || kubectl create ns "${NS}"
-
-          for f in "${FILES[@]}"; do
-            echo "::group::${ACTION^^}: $f"
-            if [ "$ACTION" = "apply" ]; then
-              # safer server-side apply to avoid client-side merge issues
-              kubectl apply --server-side --force-conflicts -n "${NS}" -f "$f"
-              # add a management label (best-effort)
-              # labels only apply to namespaced resources we can find afterward
-              kubectl -n "${NS}" get -f "$f" -o name | xargs -r -n1 -I{} kubectl -n "${NS}" label --overwrite {} "$MANAGED_LABEL" || echo "warn: label best-effort"
-            else
-              kubectl delete -n "${NS}" -f "$f" --ignore-not-found=true
-            fi
-            echo "::endgroup::"
-          done
-
-      - name: Wait for rollouts (optional)
-        if: ${{ github.event.inputs.wait == 'true' && github.event.inputs.action == 'apply' }}
-        shell: bash
-        env:
-          NS: ${{ github.event.inputs.namespace }}
-          FILE_IN: ${{ github.event.inputs.file }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          mapfile -t FILES < <(eval echo "$FILE_IN")
-          # Wait for Deployments and StatefulSets contained in the manifests
-          for f in "${FILES[@]}"; do
-            # Deployments
-            for name in $(kubectl -n "$NS" get -f "$f" --ignore-not-found -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.name}{"\n"}{end}'); do
-              echo "Waiting for Deployment/$name rollout…"
-              kubectl -n "$NS" rollout status deploy "$name" --timeout=5m
-            done
-            # StatefulSets
-            for name in $(kubectl -n "$NS" get -f "$f" --ignore-not-found -o jsonpath='{range .items[?(@.kind=="StatefulSet")]}{.metadata.name}{"\n"}{end}'); do
-              echo "Waiting for StatefulSet/$name rollout…"
-              kubectl -n "$NS" rollout status sts "$name" --timeout=10m
-            done
-          done
-
-      - name: Quick summary
-        if: ${{ github.event.inputs.action == 'apply' }}
-        run: |
-          echo "Nodes (arch & capacity type):"
-          kubectl get nodes -L kubernetes.io/arch,karpenter.sh/capacity-type
-          echo
-          echo "Deployments in namespace '${{ github.event.inputs.namespace }}':"
-          kubectl -n "${{ github.event.inputs.namespace }}" get deploy -o wide
+          file: ${{ github.event.inputs.file }}
+          namespace: ${{ github.event.inputs.namespace }}
+          action: ${{ github.event.inputs.action }}
+          wait: ${{ github.event.inputs.wait }}

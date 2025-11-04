@@ -1,0 +1,20 @@
+name: "Setup kubeconfig for EKS"
+description: "Install kubectl and configure kubeconfig for the EKS cluster"
+
+inputs:
+  cluster:
+    required: true
+  region:
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - uses: azure/setup-kubectl@v4
+      with:
+        version: "latest"
+
+    - name: Update kubeconfig
+      shell: bash
+      run: |
+        aws eks update-kubeconfig --name "${{ inputs.cluster }}" --region "${{ inputs.region }}"
