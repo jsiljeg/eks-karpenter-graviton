@@ -48,8 +48,8 @@ jobs:
       - name: Setup kubeconfig
         uses: ./.github/actions/kubeconfig
         with:
-          cluster: ${{ steps.cfg.outputs.cluster }}
           region: ${{ steps.cfg.outputs.region }}
+          cluster: ${{ steps.cfg.outputs.cluster }}
 
       - name: Deploy manifests
         uses: ./.github/actions/deploy-manifests
