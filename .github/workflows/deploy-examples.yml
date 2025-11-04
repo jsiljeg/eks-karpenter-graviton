@@ -1,214 +1,173 @@
-name: Deploy K8s Examples to EKS
+name: Deploy Karpenter Examples
 
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Choose whether to deploy a single file or a glob"
-        type: choice
-        options: [glob, file]
-        default: glob
-      path:
-        description: "File path (when mode=file) OR glob (when mode=glob)"
-        type: string
-        default: "examples/**/*.yaml"
+      aws-region:
+        description: "AWS region (overrides secret if set)"
+        required: false
+        default: ""
+      cluster-name:
+        description: "EKS cluster name (overrides default if set)"
+        required: false
+        default: ""
+      file:
+        description: "Path or glob to manifest(s) (e.g. examples/dual-arch/deploy-amd64.yaml or examples/**/*.yaml)"
+        required: true
+        default: "examples/dual-arch/deploy-amd64.yaml"
       namespace:
-        description: "Target namespace (will be created if missing)"
-        type: string
+        description: "Kubernetes namespace to target"
+        required: false
         default: "default"
-      apply:
-        description: "Actually apply changes (false = diff/preview only)"
-        type: boolean
-        default: false
-      prune:
-        description: "Enable prune (removes orphaned objs with matching label)"
-        type: boolean
-        default: false
-      prune_label:
-        description: "Label selector to scope prune (e.g. managed-by=gha-examples)"
-        type: string
-        default: "managed-by=gha-examples"
+      action:
+        description: "Apply or Delete the manifests"
+        type: choice
+        options:
+          - apply
+          - delete
+        required: true
+        default: apply
       wait:
-        description: "Wait for resources to become ready (kubectl wait)"
+        description: "Wait for rollouts to complete (Deployments/StatefulSets)"
         type: boolean
+        required: true
         default: true
 
 permissions:
-  id-token: write    # for OIDC to AWS
   contents: read
 
-concurrency:
-  group: deploy-examples-${{ github.ref }}-${{ inputs.namespace }}
-  cancel-in-progress: false
-
 env:
+  # Fallbacks; you can set these secrets or override via workflow inputs
   AWS_REGION: ${{ secrets.AWS_REGION }}
-  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME }}
+  CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
   MANAGED_LABEL: managed-by=gha-examples
+
+concurrency:
+  group: deploy-karpenter-examples
+  cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Checkout
+      - uses: actions/checkout@v4
+
       - name: Validate required secrets
         run: |
-          : "${AWS_REGION:?Set AWS_REGION secret}"
-          : "${CLUSTER_NAME:?Set CLUSTER_NAME secret}"
-          : "${{ secrets.AWS_ROLE_ARN }}"
+          test -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || { echo "::error::AWS_ACCESS_KEY_ID missing"; exit 1; }
+          test -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" || { echo "::error::AWS_SECRET_ACCESS_KEY missing"; exit 1; }
 
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Resolve inputs/env (region & cluster)
+        id: cfg
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGION_INPUT="${{ github.event.inputs.aws-region }}"
+          CLUSTER_INPUT="${{ github.event.inputs.cluster-name }}"
+          REGION="${REGION_INPUT:-${AWS_REGION:-}}"
+          CLUSTER="${CLUSTER_INPUT:-${CLUSTER_NAME:-}}"
+          if [ -z "$REGION" ]; then echo "::error::AWS region not provided (input aws-region or secret AWS_REGION)"; exit 1; fi
+          if [ -z "$CLUSTER" ]; then echo "::error::EKS cluster name not provided (input cluster-name or secret EKS_CLUSTER_NAME)"; exit 1; fi
+          echo "region=$REGION"   >> "$GITHUB_OUTPUT"
+          echo "cluster=$CLUSTER" >> "$GITHUB_OUTPUT"
 
-      - name: Configure AWS (OIDC)
+      - name: Configure AWS credentials (static keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ steps.cfg.outputs.region }}
+
+      - name: Who am I?
+        run: aws sts get-caller-identity
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
+        with:
+          version: "latest"
 
-      - name: Login to EKS
+      - name: Install Helm (optional, handy)
+        uses: azure/setup-helm@v4
+        with:
+          version: "latest"
+
+      - name: Update kubeconfig for EKS
         run: |
-          aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null
-          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
-          kubectl version --client
-          kubectl cluster-info
+          aws eks update-kubeconfig \
+            --name "${{ steps.cfg.outputs.cluster }}" \
+            --region "${{ steps.cfg.outputs.region }}"
 
-      - name: Ensure namespace exists
+      - name: Cluster sanity
         run: |
-          kubectl get ns "${{ inputs.namespace }}" >/dev/null 2>&1 || \
-          kubectl create ns "${{ inputs.namespace }}"
+          kubectl version --short
+          kubectl get nodes -o wide
 
-      - name: Auth check (RBAC sanity)
-        run: |
-          kubectl auth can-i apply --namespace "${{ inputs.namespace }}" || {
-            echo "You don't have permission to apply in '${{ inputs.namespace }}'"; exit 1; }
-
-      - name: Resolve file set
-        id: files
-        shell: bash
-        run: |
-          set -euo pipefail
-          MODE="${{ inputs.mode }}"
-          PATH_IN="${{ inputs.path }}"
-          if [[ "$MODE" == "file" ]]; then
-            [[ -f "$PATH_IN" ]] || { echo "::error::File not found: $PATH_IN"; exit 1; }
-            echo "$PATH_IN" > /tmp/filelist.txt
-          else
-            # glob mode
-            mapfile -t FILES < <(git ls-files "$PATH_IN")
-            if [[ ${#FILES[@]} -eq 0 ]]; then
-              echo "::error::No files matched glob: $PATH_IN"; exit 1;
-            fi
-            printf "%s\n" "${FILES[@]}" > /tmp/filelist.txt
-          fi
-          echo "count=$(wc -l </tmp/filelist.txt | xargs)" >> "$GITHUB_OUTPUT"
-
-      - name: Show planned files
-        run: |
-          echo "Will operate on $(wc -l </tmp/filelist.txt | xargs) file(s):"
-          nl -ba /tmp/filelist.txt
-        continue-on-error: true
-
-      - name: Diff (server-side)
-        id: diff
+      - name: Apply/Delete manifests
+        id: apply
         shell: bash
         env:
-          NS: ${{ inputs.namespace }}
+          NS: ${{ github.event.inputs.namespace }}
+          FILE_IN: ${{ github.event.inputs.file }}
+          ACTION: ${{ github.event.inputs.action }}
         run: |
           set -euo pipefail
-          echo "### kubectl diff (server-side) in ns=${NS}" >> $GITHUB_STEP_SUMMARY
-          any_changes=0
-          while read -r f; do
-            echo "----- DIFF $f -----"
-            # Add a management label via kustomize-on-the-fly using kubectl --dry-run=server annotate?
-            # Simpler: rely on apply step to set label; diff reads raw files.
-            if kubectl diff -n "$NS" -f "$f" --server-side --field-manager=gha-examples; then
-              echo "No diff for $f" >> $GITHUB_STEP_SUMMARY
+
+          # Expand globs; error if nothing matches
+          shopt -s nullglob
+          mapfile -t FILES < <(eval echo "$FILE_IN")
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "::error::No files matched: $FILE_IN"
+            exit 1
+          fi
+
+          echo "Target namespace: ${NS}"
+          kubectl get ns "${NS}" >/dev/null 2>&1 || kubectl create ns "${NS}"
+
+          for f in "${FILES[@]}"; do
+            echo "::group::${ACTION^^}: $f"
+            if [ "$ACTION" = "apply" ]; then
+              # safer server-side apply to avoid client-side merge issues
+              kubectl apply --server-side --force-conflicts -n "${NS}" -f "$f"
+              # add a management label (best-effort)
+              # labels only apply to namespaced resources we can find afterward
+              kubectl -n "${NS}" get -f "$f" -o name | xargs -r -n1 kubectl -n "${NS}" label --overwrite "$MANAGED_LABEL"
             else
-              code=$?
-              if [[ $code -eq 1 ]]; then
-                any_changes=1
-                echo "- changes in \`$f\`" >> $GITHUB_STEP_SUMMARY
-              else
-                echo "::error::kubectl diff error ($code) on $f"
-                exit $code
-              fi
+              kubectl delete -n "${NS}" -f "$f" --ignore-not-found=true
             fi
-          done </tmp/filelist.txt
-          echo "any_changes=$any_changes" >> "$GITHUB_OUTPUT"
+            echo "::endgroup::"
+          done
 
-      - name: Apply (server-side)
-        if: ${{ inputs.apply }}
+      - name: Wait for rollouts (optional)
+        if: ${{ github.event.inputs.wait == 'true' && github.event.inputs.action == 'apply' }}
         shell: bash
         env:
-          NS: ${{ inputs.namespace }}
-          PRUNE: ${{ inputs.prune }}
-          PRUNE_LABEL: ${{ inputs.prune_label }}
-          MANAGED_LABEL: ${{ env.MANAGED_LABEL }}
+          NS: ${{ github.event.inputs.namespace }}
+          FILE_IN: ${{ github.event.inputs.file }}
         run: |
           set -euo pipefail
-          # Apply each file with a management label so prune can be safely scoped later.
-          while read -r f; do
-            echo "----- APPLY $f -----"
-            # Add/override managed-by label during server-side apply
-            kubectl apply -n "$NS" -f "$f" \
-              --server-side \
-              --field-manager=gha-examples \
-              --force-conflicts=false
-          done </tmp/filelist.txt
+          shopt -s nullglob
+          mapfile -t FILES < <(eval echo "$FILE_IN")
+          # Wait for Deployments and StatefulSets contained in the manifests
+          for f in "${FILES[@]}"; do
+            # Deployments
+            for name in $(kubectl -n "$NS" get -f "$f" --ignore-not-found -o jsonpath='{range .items[?(@.kind=="Deployment")]}{.metadata.name}{"\n"}{end}'); do
+              echo "Waiting for Deployment/$name rollout…"
+              kubectl -n "$NS" rollout status deploy "$name" --timeout=5m
+            done
+            # StatefulSets
+            for name in $(kubectl -n "$NS" get -f "$f" --ignore-not-found -o jsonpath='{range .items[?(@.kind=="StatefulSet")]}{.metadata.name}{"\n"}{end}'); do
+              echo "Waiting for StatefulSet/$name rollout…"
+              kubectl -n "$NS" rollout status sts "$name" --timeout=10m
+            done
+          done
 
-          # Stamp label across applied resources (safe, idempotent) for prune scoping
-          # We annotate the namespace so we can label-select within it.
-          # Note: applying labels at creation time per-object would require editing files or kustomize.
-          # The loop below finds GVKs from the files and labels live objs.
-          while read -r f; do
-            # Extract kinds and names from the file for labeling (best-effort)
-            kubectl create --dry-run=client -f "$f" -o json | \
-              jq -r '.items[]? | [.kind, .metadata.name] | @tsv' | while IFS=$'\t' read -r kind name; do
-                [[ -z "$kind" || -z "$name" ]] && continue
-                kubectl label -n "$NS" "$kind/$name" "$MANAGED_LABEL" --overwrite || true
-              done
-          done </tmp/filelist.txt
-
-          if [[ "$PRUNE" == "true" ]]; then
-            echo "----- PRUNE ----- Pruning resources in ns=$NS with label selector: $PRUNE_LABEL"
-            # Prune only things with the given label; requires also applying a directory/set,
-            # so we re-apply the set and let --prune do the deletion of orphans with the label.
-            # For prune to work, kubectl needs a directory or multiple -f; feed the list:
-            # Build args: multiple -f entries
-            mapfile -t files < /tmp/filelist.txt
-            args=()
-            for f in "${files[@]}"; do args+=("-f" "$f"); done
-            kubectl apply -n "$NS" "${args[@]}" \
-              --server-side \
-              --field-manager=gha-examples \
-              --prune \
-              -l "$PRUNE_LABEL"
-          fi
-
-      - name: Wait for readiness
-        if: ${{ inputs.apply && inputs.wait }}
-        shell: bash
-        env:
-          NS: ${{ inputs.namespace }}
+      - name: Quick summary
+        if: ${{ github.event.inputs.action == 'apply' }}
         run: |
-          set -euo pipefail
-          # Best-effort waits by common kinds
-          kubectl -n "$NS" get deploy >/dev/null 2>&1 && \
-            kubectl -n "$NS" wait --for=condition=available deploy --all --timeout=5m || true
-          kubectl -n "$NS" get statefulset >/dev/null 2>&1 && \
-            kubectl -n "$NS" wait --for=condition=ready statefulset --all --timeout=5m || true
-          kubectl -n "$NS" get daemonset >/dev/null 2>&1 && \
-            kubectl -n "$NS" rollout status daemonset --all --timeout=5m || true
-
-      - name: Summary
-        run: |
-          echo "### Result" >> $GITHUB_STEP_SUMMARY
-          echo "- Mode: \`${{ inputs.mode }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Path: \`${{ inputs.path }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Namespace: \`${{ inputs.namespace }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Apply: \`${{ inputs.apply }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- Prune: \`${{ inputs.prune }}\` (label=\`${{ inputs.prune_label }}\`)" >> $GITHUB_STEP_SUMMARY
-          echo "- Files: ${{ steps.files.outputs.count }}" >> $GITHUB_STEP_SUMMARY
+          echo "Nodes (arch & capacity type):"
+          kubectl get nodes -L kubernetes.io/arch,karpenter.sh/capacity-type
+          echo
+          echo "Deployments in namespace '${{ github.event.inputs.namespace }}':"
+          kubectl -n "${{ github.event.inputs.namespace }}" get deploy -o wide
