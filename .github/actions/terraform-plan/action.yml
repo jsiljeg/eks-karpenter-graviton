@@ -38,100 +38,92 @@ runs:
         aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
         aws-region: ${{ inputs.aws-region }}
 
-    # Initialize Terraform
+    # Terraform CLI
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
       with:
         terraform_version: ${{ inputs.terraform-version }}
         terraform_wrapper: true
 
+    # TF plugin cache location
     - name: Configure Terraform plugin cache
-      run: |
-        echo 'plugin_cache_dir="$HOME/.terraform.d/plugin-cache"' > $HOME/.terraformrc
-        mkdir -p $HOME/.terraform.d/plugin-cache
-      shell: bash
-
-    - name: Cache .terraform dir (modules/providers)
-      id: tf_work_cache
-      uses: actions/cache@v3
-      with:
-        path: ${{ inputs.terraform-directory }}/.terraform
-        key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}-${{ inputs.terraform-directory }}
-        restore-keys: |
-          ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-
-
-    - name: Test cache hit
-      run: echo "workdir cache-hit=${{ steps.tf_work_cache.outputs.cache-hit }}"
-      shell: bash
-
-    - name: Inspect caches
       shell: bash
       run: |
-        echo "workdir cache-hit=${{ steps.tf_work_cache.outputs.cache-hit }}"
-        echo "plugin cache-hit=${{ steps.tf_cache.outputs.cache-hit }}"
-        du -sh ~/.terraform.d/plugin-cache || true
-        du -sh ${{ inputs.terraform-directory }}/.terraform || true
+        echo 'plugin_cache_dir="$HOME/.terraform.d/plugin-cache"' > "$HOME/.terraformrc"
+        mkdir -p "$HOME/.terraform.d/plugin-cache"
 
-    - name: Use Terraform plugin cache
-      id: tf_cache
-      uses: actions/cache@v3
+    # ---- Cache restore (specific lookup first, then generic fallback)
+
+    # Plugin cache (specific lookup-only by lockfile hash)
+    - name: Restore plugin cache (specific)
+      id: tf_cache_spec
+      uses: actions/cache/restore@v3
       with:
         path: ~/.terraform.d/plugin-cache
         key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}
+        lookup-only: true
+
+    # Plugin cache (generic fallback)
+    - name: Restore plugin cache (generic)
+      if: steps.tf_cache_spec.outputs.cache-hit != 'true'
+      id: tf_cache
+      uses: actions/cache/restore@v3
+      with:
+        path: ~/.terraform.d/plugin-cache
+        key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-
         restore-keys: |
-          ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-
           ${{ runner.os }}-tf-plugin-cache-
 
-    - name: Test cache hit
-      run: echo "plugin cache-hit=${{ steps.tf_cache.outputs.cache-hit }}"
-      shell: bash
+    # .terraform working dir (specific lookup-only by lockfile hash)
+    - name: Restore .terraform (specific)
+      id: tf_work_spec
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ inputs.terraform-directory }}/.terraform
+        key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}-${{ inputs.terraform-directory }}
+        lookup-only: true
 
-    - name: Inspect caches
-      shell: bash
-      run: |
-        echo "workdir cache-hit=${{ steps.tf_work_cache.outputs.cache-hit }}"
-        echo "plugin cache-hit=${{ steps.tf_cache.outputs.cache-hit }}"
-        du -sh ~/.terraform.d/plugin-cache || true
-        du -sh ${{ inputs.terraform-directory }}/.terraform || true
+    # .terraform working dir (generic fallback)
+    - name: Restore .terraform (generic)
+      if: steps.tf_work_spec.outputs.cache-hit != 'true'
+      id: tf_work_cache
+      uses: actions/cache/restore@v3
+      with:
+        path: ${{ inputs.terraform-directory }}/.terraform
+        key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-
 
-    - name: Terraform provider cache work-around
-      working-directory: ${{ inputs.terraform-directory }}
-      run: |
-        terraform init
-      shell: bash
-      continue-on-error: true
-
+    # Terraform init + provider lock (for runner arch)
     - name: Terraform init
       working-directory: ${{ inputs.terraform-directory }}
       shell: bash
       run: |
         terraform init
-        # lock for current runner platform
         arch=$(uname -m); [ "$arch" = "x86_64" ] && arch="amd64"
         terraform providers lock -platform=linux_${arch}
 
-    # Save plugin cache with the now-known specific key (after lockfile exists)
+    # ---- Save specific caches after lockfile exists (so next run hits specific key)
+
     - name: Save plugin cache (specific)
-      if: steps.tf_cache.outputs.cache-hit != 'true'
+      if: steps.tf_cache_spec.outputs.cache-hit != 'true'
       uses: actions/cache/save@v3
       with:
         path: ~/.terraform.d/plugin-cache
         key: ${{ runner.os }}-tf-plugin-cache-tf${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}
 
-    # Save .terraform/modules/providers dir with specific key (after init)
     - name: Save .terraform cache (specific)
-      if: steps.tf_work_cache.outputs.cache-hit != 'true'
+      if: steps.tf_work_spec.outputs.cache-hit != 'true'
       uses: actions/cache/save@v3
       with:
         path: ${{ inputs.terraform-directory }}/.terraform
         key: ${{ runner.os }}-tf-workdir-${{ inputs.terraform-version }}-${{ hashFiles(format('{0}/**/.terraform.lock.hcl', inputs.terraform-directory)) }}-${{ inputs.terraform-directory }}
 
-    # Terraform Plan
+    # Validate
     - name: TF validate
       working-directory: ${{ inputs.terraform-directory }}
-      run: terraform validate
       shell: bash
+      run: terraform validate
 
+    # Plan
     - name: Terraform plan
       id: tfplan
       working-directory: ${{ inputs.terraform-directory }}
@@ -140,6 +132,7 @@ runs:
         terraform plan -no-color -out=${{ inputs.terraform-plan-output }} > /dev/null
         terraform show -no-color ${{ inputs.terraform-plan-output }} > tfplan_output.txt
 
+    # Summary
     - name: Display Terraform plan on summary
       working-directory: ${{ inputs.terraform-directory }}
       shell: bash
@@ -149,6 +142,7 @@ runs:
         cat tfplan_output.txt >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
 
+    # Fail if plan step failed
     - name: Fail if Terraform plan failed
       if: steps.tfplan.outcome != 'success'
       working-directory: ${{ inputs.terraform-directory }}
