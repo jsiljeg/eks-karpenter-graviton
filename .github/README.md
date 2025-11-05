@@ -24,7 +24,7 @@ This folder contains:
 - **Bonus**: Hashing within terraform plan
 
 
-- ![gha-cache-hit.png](../docs/img/gha-cache-hit.png)
+![gha-cache-hit.png](../docs/img/gha-cache-hit.png)
 ![gha-plan.png](../docs/img/gha-plan.png)
 ### 2) “(development) EKS Karpenter Terraform Apply”
 
