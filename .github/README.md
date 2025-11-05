@@ -21,14 +21,16 @@ This folder contains:
 - **Triggers**: Pull Requests to `main` that touch the `terraform/environments/development/aws/<region>/eks-karpenter/**` or `terraform/modules/eks-karpenter/**` paths (or manual run)
 - **What it does**: Checks out the repo and runs the reusable **terraform-plan** action against that directory
 - **Why**: Produce safe diffs before merging infra changes
+- **Bonus**: Hashing within terraform plan
 
+
+- ![gha-cache-hit.png](../docs/img/gha-cache-hit.png)
 ![gha-plan.png](../docs/img/gha-plan.png)
 ### 2) “(development) EKS Karpenter Terraform Apply”
 
 - **Triggers**: Pushes to `main` that touch the same Terraform paths
 - **What it does**: Executes **terraform-apply** composite action
-- **Bonus #1**: Has a dependent job **Retry after fail** to mitigate transient AWS/API hiccups
-- **Bonus #2**: Hashing of `.terraform.lock.hcl` and `.terraform` directory
+- **Bonus**: Has a dependent job **Retry after fail** to mitigate transient AWS/API hiccups
 
 ![gha-apply.png](../docs/img/gha-apply.png)
 
