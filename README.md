@@ -36,6 +36,7 @@ This repository bootstraps a production‑ready **AWS EKS** cluster in a **dedic
 2) **Plan** changes (PR to `main` or manual run):
 - Workflow: **“(development) EKS Karpenter Terraform Plan”**  
 - It runs against `terraform/environments/development/aws/<REGION>/eks-karpenter`
+- Caching in place
 
 3) **Apply** changes (merge to `main` or manual run):
 - Workflow: **“(development) EKS Karpenter Terraform Apply”**  
